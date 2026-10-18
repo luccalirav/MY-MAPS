@@ -1,0 +1,17 @@
+# ambiente virtual e caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# dados do dia a dia ficam só no PC (endereços e referências reais)
+*.kml
+*.pdf
+dados/*
+!dados/.gitkeep
+saida/*
+!saida/.gitkeep
+
+# editores
+.vscode/
+.idea/
