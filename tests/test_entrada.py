@@ -65,3 +65,11 @@ def test_erro_ao_gerar_nao_derruba_o_programa(tmp_path):
 
     entrada.fluxo_interativo(gerar, tmp_path, entrada=lambda _: next(fila), saida=msgs.append)
     assert any('deu ruim' in str(m) for m in msgs)
+
+
+def test_resumo_mostra_o_kml_em_uso(tmp_path):
+    fila = iter(['Rua X, 10', '-22.75, -51.37', 'n', ''])
+    msgs = []
+    entrada.fluxo_interativo(lambda *a: None, tmp_path, entrada=lambda _: next(fila), saida=msgs.append,
+                             info_kml=lambda: 'MAPA (5).kml (arquivo de 18/10/2026 14:20)')
+    assert any('MAPA (5).kml' in str(m) for m in msgs)

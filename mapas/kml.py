@@ -1,9 +1,9 @@
 """Leitura do KML (Google My Maps) e registro de quando ele foi atualizado."""
 from __future__ import annotations
 
-import json
+import os
 import re
-import shutil
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +12,6 @@ from xml.etree import ElementTree as ET
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
-from . import config
 
 NS = '{http://www.opengis.net/kml/2.2}'
 CAMADA_LOCALIDADES = 'LOCALIDADES'
@@ -74,8 +73,16 @@ def carregar_kml(caminho: str | Path) -> MapaKML:
     if not caminho.is_file():
         raise ErroKML(f'KML não encontrado: {caminho}')
     try:
-        raiz = ET.parse(caminho).getroot()
-    except ET.ParseError as e:
+        if caminho.suffix.lower() == '.kmz':          # KMZ = zip com o KML dentro (doc.kml)
+            with zipfile.ZipFile(caminho) as z:
+                nomes = [n for n in z.namelist() if n.lower().endswith('.kml')]
+                if not nomes:
+                    raise ErroKML('O KMZ não contém nenhum arquivo .kml.')
+                interno = 'doc.kml' if 'doc.kml' in nomes else nomes[0]
+                raiz = ET.fromstring(z.read(interno))
+        else:
+            raiz = ET.parse(caminho).getroot()
+    except (ET.ParseError, zipfile.BadZipFile) as e:
         raise ErroKML(f'Não consegui ler o KML ({e}).') from e
 
     estilos = {s.get('id'): s for s in raiz.iter(NS + 'Style')}
@@ -122,61 +129,63 @@ def carregar_kml(caminho: str | Path) -> MapaKML:
     return mapa
 
 
-# ---------------------------------------------------------------- registro de atualização
+# ---------------------------------------------------------------- pasta do KML
 
-def _agora() -> datetime:
-    return datetime.now().replace(microsecond=0)
+@dataclass
+class ArquivoKML:
+    caminho: Path
+    data: datetime       # data do arquivo (a mais recente entre modificação e criação, no Windows)
 
+    @property
+    def nome(self) -> str:
+        return self.caminho.name
 
-def ler_info(pasta_dados: str | Path = config.PASTA_DADOS) -> dict | None:
-    arq = Path(pasta_dados) / config.INFO_KML
-    if not arq.is_file():
-        return None
-    return json.loads(arq.read_text(encoding='utf-8'))
-
-
-def caminho_kml_atual(pasta_dados: str | Path = config.PASTA_DADOS) -> Path | None:
-    arq = Path(pasta_dados) / config.KML_ATUAL
-    return arq if arq.is_file() else None
+    @property
+    def data_formatada(self) -> str:
+        return self.data.strftime('%d/%m/%Y %H:%M')
 
 
-def importar_kml(origem: str | Path, pasta_dados: str | Path = config.PASTA_DADOS,
-                 agora: datetime | None = None) -> dict:
-    """Valida o KML novo, guarda o anterior como backup e registra a data da atualização."""
-    origem = Path(origem)
-    novo = carregar_kml(origem)                                  # falha aqui se o arquivo for inválido
-    if not novo.quarteiroes:
-        raise ErroKML('O KML não tem nenhum quarteirão. Confira se é o arquivo certo.')
-
-    pasta = Path(pasta_dados)
-    pasta.mkdir(parents=True, exist_ok=True)
-    atual = pasta / config.KML_ATUAL
-    antigos = None
-    if atual.is_file():
-        try:
-            antigos = len(carregar_kml(atual).quarteiroes)
-        except ErroKML:
-            antigos = None
-        shutil.copy2(atual, pasta / config.KML_ANTERIOR)
-    shutil.copy2(origem, atual)
-
-    quando = (agora or _agora()).isoformat()
-    info_antiga = ler_info(pasta) or {}
-    historico = info_antiga.get('historico', [])
-    historico.append({'data': quando, 'nome_original': origem.name,
-                      'quarteiroes': len(novo.quarteiroes)})
-    info = {
-        'arquivo': config.KML_ATUAL,
-        'nome_original': origem.name,
-        'atualizado_em': quando,
-        'quarteiroes': len(novo.quarteiroes),
-        'localidades': len(novo.localidades),
-        'quarteiroes_antes': antigos,
-        'historico': historico[-50:],
-    }
-    (pasta / config.INFO_KML).write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding='utf-8')
-    return info
+def _data_do_arquivo(caminho: Path) -> datetime:
+    st = caminho.stat()
+    ts = max(st.st_mtime, st.st_ctime) if os.name == 'nt' else st.st_mtime   # no Windows, ctime = criação
+    return datetime.fromtimestamp(ts).replace(microsecond=0)
 
 
-def formatar_data(iso: str) -> str:
-    return datetime.fromisoformat(iso).strftime('%d/%m/%Y %H:%M')
+def listar_kmls(pasta: str | Path) -> list[ArquivoKML]:
+    """KML/KMZ da pasta, do mais recente para o mais antigo (ignora temporários e ocultos)."""
+    pasta = Path(pasta)
+    if not pasta.is_dir():
+        raise ErroKML(f'Pasta do KML não encontrada: {pasta}\n'
+                      '  Crie a pasta, ou aponte outra com --pasta-kml (ou config_local.json).')
+    achados = [ArquivoKML(p, _data_do_arquivo(p)) for p in pasta.iterdir()
+               if p.is_file() and p.suffix.lower() in ('.kml', '.kmz') and not p.name.startswith(('~', '.'))]
+    if not achados:
+        raise ErroKML(f'Não há nenhum arquivo .kml na pasta: {pasta}')
+    return sorted(achados, key=lambda a: (a.data, a.nome), reverse=True)
+
+
+class FonteKML:
+    """Usa sempre o KML mais recente da pasta; recarrega sozinho se o arquivo mudar."""
+
+    def __init__(self, pasta: str | Path):
+        self.pasta = Path(pasta)
+        self._cache = None                      # (assinatura, MapaKML)
+
+    def arquivo(self) -> ArquivoKML:
+        return listar_kmls(self.pasta)[0]
+
+    def avisos(self) -> list[str]:
+        todos = listar_kmls(self.pasta)
+        if len(todos) > 1:
+            antigos = ', '.join(a.nome for a in todos[1:])
+            return [f'há {len(todos)} arquivos na pasta do KML; usando o mais recente. '
+                    f'Pode apagar os mais antigos: {antigos}']
+        return []
+
+    def carregar(self) -> tuple[MapaKML, ArquivoKML]:
+        arq = self.arquivo()
+        st = arq.caminho.stat()
+        assinatura = (arq.caminho, st.st_mtime_ns, st.st_size)
+        if self._cache is None or self._cache[0] != assinatura:
+            self._cache = (assinatura, carregar_kml(arq.caminho))
+        return self._cache[1], arq

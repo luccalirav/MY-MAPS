@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Mapa de bloqueio de notificação (raio de 150 m).
 
-  python main.py                      gera mapas (pergunta endereço e coordenadas)
-  python main.py kml ARQUIVO.kml      atualiza o KML e registra a data
-  python main.py status               mostra qual KML está em uso e quando foi atualizado
+  python main.py          gera mapas (pergunta endereço e coordenadas)
+  python main.py status   mostra qual KML está em uso
+
+O KML usado é sempre o arquivo mais recente da pasta de KML.
+Para trocar a base: coloque o KML novo na pasta e apague o mais antigo.
 """
 import argparse
 import sys
@@ -12,62 +14,57 @@ from pathlib import Path
 from mapas import config, desenho, entrada, kml
 
 
-def _mostrar_status() -> bool:
-    info = kml.ler_info()
-    if not info or not kml.caminho_kml_atual():
-        print('Nenhum KML registrado ainda.')
-        print('Registre um com:  python main.py kml "C:\\caminho\\arquivo.kml"')
-        return False
-    print(f"KML em uso     : {info['nome_original']}")
-    print(f"Atualizado em  : {kml.formatar_data(info['atualizado_em'])}")
-    print(f"Quarteirões    : {info['quarteiroes']}   Localidades: {info['localidades']}")
-    return True
+def _info(fonte: kml.FonteKML) -> str:
+    arq = fonte.arquivo()
+    return f'{arq.nome} (arquivo de {arq.data_formatada})'
 
 
-def cmd_kml(args) -> int:
+def _mostrar_status(fonte: kml.FonteKML) -> bool:
     try:
-        info = kml.importar_kml(args.arquivo)
+        print(f'Pasta do KML : {fonte.pasta}')
+        print(f'KML em uso   : {_info(fonte)}')
+        for aviso in fonte.avisos():
+            print(f'  ⚠ {aviso}')
+        return True
     except kml.ErroKML as e:
         print(f'✗ {e}')
-        return 1
-    print(f"✓ KML atualizado em {kml.formatar_data(info['atualizado_em'])}")
-    print(f"  Arquivo: {info['nome_original']}")
-    print(f"  Quarteirões: {info['quarteiroes']}   Localidades: {info['localidades']}")
-    antes = info.get('quarteiroes_antes')
-    if antes is not None:
-        print(f'  Antes: {antes} quarteirões (diferença: {info["quarteiroes"] - antes:+d})')
-    return 0
+        return False
 
 
 def cmd_status(args) -> int:
-    return 0 if _mostrar_status() else 1
+    return 0 if _mostrar_status(kml.FonteKML(config.pasta_kml(args.pasta_kml))) else 1
 
 
 def cmd_gerar(args) -> int:
-    if not _mostrar_status():
+    fonte = kml.FonteKML(config.pasta_kml(args.pasta_kml))
+    if not _mostrar_status(fonte):
         return 1
-    mapa = kml.carregar_kml(kml.caminho_kml_atual())
+    try:
+        fonte.carregar()                                   # falha cedo se o KML estiver ilegível
+    except kml.ErroKML as e:
+        print(f'✗ {e}')
+        return 1
     pasta = Path(args.saida)
     pasta.mkdir(parents=True, exist_ok=True)
 
     def gerar(endereco, lat, lon):
+        mapa, _ = fonte.carregar()                         # sempre o KML mais recente da pasta
         destino = pasta / entrada.nome_arquivo(endereco)
         resultado = desenho.gerar_pdf(mapa, endereco, lat, lon, destino)
         return destino, resultado.avisos
 
-    entrada.fluxo_interativo(gerar, pasta)
+    entrada.fluxo_interativo(gerar, pasta, info_kml=lambda: _info(fonte))
     return 0
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description='Mapa de bloqueio de notificação (raio de 150 m)')
     ap.add_argument('--saida', default=str(config.PASTA_SAIDA), help='pasta onde os PDFs são salvos')
+    ap.add_argument('--pasta-kml', default=None, help='pasta onde ficam os KML (padrão: config.py)')
     sub = ap.add_subparsers(dest='comando')
-    p = sub.add_parser('kml', help='atualiza o KML e registra a data')
-    p.add_argument('arquivo')
-    sub.add_parser('status', help='mostra o KML em uso e a data da última atualização')
+    sub.add_parser('status', help='mostra o KML em uso')
     args = ap.parse_args(argv)
-    return {'kml': cmd_kml, 'status': cmd_status}.get(args.comando, cmd_gerar)(args)
+    return {'status': cmd_status}.get(args.comando, cmd_gerar)(args)
 
 
 if __name__ == '__main__':

@@ -1,4 +1,7 @@
-from datetime import datetime
+import os
+import shutil
+import time
+import zipfile
 
 import pytest
 
@@ -39,23 +42,70 @@ def test_arquivo_inexistente(tmp_path):
         kml.carregar_kml(tmp_path / 'nao_existe.kml')
 
 
-def test_importar_registra_data_e_historico(kml_mini, tmp_path):
-    dados = tmp_path / 'dados'
-    info = kml.importar_kml(kml_mini, dados, agora=datetime(2026, 10, 18, 9, 30))
-    assert (dados / config.KML_ATUAL).is_file()
-    assert info['quarteiroes'] == 12 and info['quarteiroes_antes'] is None
-    assert kml.formatar_data(info['atualizado_em']) == '18/10/2026 09:30'
-
-    info2 = kml.importar_kml(kml_mini, dados, agora=datetime(2026, 10, 19, 8, 0))
-    assert (dados / config.KML_ANTERIOR).is_file()           # backup do anterior
-    assert info2['quarteiroes_antes'] == 12
-    assert len(info2['historico']) == 2
-    assert kml.ler_info(dados)['atualizado_em'].startswith('2026-10-19')
+def _copiar(origem, pasta, nome, deslocamento_s):
+    """Copia o KML para a pasta com data de modificação 'agora + deslocamento' (no futuro, p/ vencer o ctime)."""
+    pasta.mkdir(exist_ok=True)
+    destino = pasta / nome
+    shutil.copy(origem, destino)
+    t = time.time() + deslocamento_s
+    os.utime(destino, (t, t))
+    return destino
 
 
-def test_importar_rejeita_kml_sem_quarteirao(tmp_path):
-    vazio = tmp_path / 'vazio.kml'
-    vazio.write_text('<kml xmlns="http://www.opengis.net/kml/2.2"><Document/></kml>', encoding='utf-8')
-    with pytest.raises(kml.ErroKML):
-        kml.importar_kml(vazio, tmp_path / 'dados')
-    assert not (tmp_path / 'dados' / config.KML_ATUAL).exists()
+def test_usa_o_kml_mais_recente_da_pasta(kml_mini, tmp_path):
+    pasta = tmp_path / 'KML'
+    _copiar(kml_mini, pasta, 'MAPA (4).kml', 1000)
+    _copiar(kml_mini, pasta, 'MAPA (5).kml', 2000)
+    fonte = kml.FonteKML(pasta)
+    assert fonte.arquivo().nome == 'MAPA (5).kml'
+    assert len(fonte.avisos()) == 1 and 'MAPA (4).kml' in fonte.avisos()[0]     # sugere apagar o antigo
+
+
+def test_apagando_o_antigo_nao_ha_aviso(kml_mini, tmp_path):
+    pasta = tmp_path / 'KML'
+    _copiar(kml_mini, pasta, 'MAPA (5).kml', 2000)
+    assert kml.FonteKML(pasta).avisos() == []
+
+
+def test_recarrega_quando_chega_um_kml_novo(kml_mini, tmp_path):
+    pasta = tmp_path / 'KML'
+    _copiar(kml_mini, pasta, 'MAPA (4).kml', 1000)
+    fonte = kml.FonteKML(pasta)
+    mapa1, arq1 = fonte.carregar()
+    assert fonte.carregar()[0] is mapa1                       # sem mudança: usa o cache
+    _copiar(kml_mini, pasta, 'MAPA (5).kml', 2000)
+    mapa2, arq2 = fonte.carregar()
+    assert arq2.nome == 'MAPA (5).kml' and mapa2 is not mapa1
+
+
+def test_ignora_temporarios_e_outros_formatos(kml_mini, tmp_path):
+    pasta = tmp_path / 'KML'
+    _copiar(kml_mini, pasta, 'MAPA.kml', 1000)
+    _copiar(kml_mini, pasta, '~$MAPA.kml', 5000)
+    (pasta / 'anotacoes.txt').write_text('oi')
+    assert [a.nome for a in kml.listar_kmls(pasta)] == ['MAPA.kml']
+
+
+def test_pasta_inexistente_ou_vazia(tmp_path):
+    with pytest.raises(kml.ErroKML, match='não encontrada'):
+        kml.listar_kmls(tmp_path / 'nao_existe')
+    (tmp_path / 'vazia').mkdir()
+    with pytest.raises(kml.ErroKML, match='nenhum arquivo'):
+        kml.listar_kmls(tmp_path / 'vazia')
+
+
+def test_le_kmz(kml_mini, tmp_path):
+    kmz = tmp_path / 'mapa.kmz'
+    with zipfile.ZipFile(kmz, 'w') as z:
+        z.write(kml_mini, 'doc.kml')
+    assert len(kml.carregar_kml(kmz).quarteiroes) == 12
+
+
+def test_pasta_kml_prioridade(tmp_path, monkeypatch):
+    assert config.pasta_kml('X:\\outra') == __import__('pathlib').Path('X:\\outra')
+    local = tmp_path / 'config_local.json'
+    local.write_text('{"pasta_kml": "D:\\\\meus\\\\kml"}', encoding='utf-8')
+    monkeypatch.setattr(config, 'ARQUIVO_LOCAL', local)
+    assert str(config.pasta_kml()) == 'D:\\meus\\kml'
+    monkeypatch.setattr(config, 'ARQUIVO_LOCAL', tmp_path / 'nao_existe.json')
+    assert config.pasta_kml() == config.PASTA_KML_PADRAO

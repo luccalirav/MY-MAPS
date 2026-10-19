@@ -44,7 +44,8 @@ def nome_arquivo(endereco: str) -> str:
 
 def fluxo_interativo(gerar: Callable[[str, float, float], tuple[Path, list[str]]],
                      pasta_saida: Path, entrada: Callable[[str], str] = input,
-                     saida: Callable[..., None] = print) -> None:
+                     saida: Callable[..., None] = print,
+                     info_kml: Callable[[], str] | None = None) -> None:
     """Repete: endereço -> coordenadas -> confirmação -> PDF. Enter vazio ou 'sair' encerra."""
     saida("\nDigite 'sair' (ou deixe vazio no endereço) para encerrar.\n")
     while True:
@@ -70,6 +71,11 @@ def fluxo_interativo(gerar: Callable[[str, float, float], tuple[Path, list[str]]
         saida(f'  Endereço    : {endereco}')
         saida(f'  Coordenadas : {lat:.6f}, {lon:.6f}')
         saida(f'  Arquivo     : {destino.name}' + ('  (já existe e será substituído)' if destino.exists() else ''))
+        if info_kml:
+            try:
+                saida(f'  KML         : {info_kml()}')
+            except Exception as e:
+                saida(f'  KML         : ✗ {e}')
 
         resposta = ''
         while resposta not in SIM | NAO:
