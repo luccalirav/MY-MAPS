@@ -8,7 +8,6 @@ __pycache__/
 *.kml
 *.kmz
 *.pdf
-KML/
 saida/*
 !saida/.gitkeep
 
